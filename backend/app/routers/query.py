@@ -1,15 +1,39 @@
-from typing import List
+"""
+POST /api/query — main SatQuery AI analysis endpoint.
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+Accepts 1–3 GeoTIFF files + a text query, validates inputs,
+runs the agentic pipeline (orchestrator → tools → EarthDial),
+and returns a structured JSON response.
+"""
 
+import logging
+from typing import List, Optional
+
+from fastapi import APIRouter, UploadFile, File, Form
+from fastapi.responses import JSONResponse
+
+from app.services.orchestrator import execute
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+ALLOWED_EXTENSIONS = {".tif", ".tiff"}
+
+
+def _error(status: int, message: str, code: str) -> JSONResponse:
+    """Return a contract-compliant error response."""
+    return JSONResponse(
+        status_code=status,
+        content={"success": False, "error": message, "error_code": code},
+    )
+
 
 @router.post("/query")
-async def query(
+def query(
     files: List[UploadFile] = File(...),
     query: str = Form(...),
+    task_hint: Optional[str] = Form("auto"),
 ):
     """
     Main SatQuery AI query endpoint.
@@ -17,100 +41,122 @@ async def query(
     Accepts:
         - 1 to 3 GeoTIFF files
         - A text query
+        - Optional task_hint: auto | vqa | grounding | change | caption | metadata | ndvi | flood
 
-    Example:
-        files = [image1.tif]
-        query = "What is visible in this satellite image?"
+    Returns the locked API contract:
+        success, answer, geojson, confidence, execution_trace, metadata
     """
 
-    # ---------------------------------------------------------
+    # -----------------------------------------------------------------
     # 1. Validate query
-    # ---------------------------------------------------------
+    # -----------------------------------------------------------------
+    if not query or not query.strip():
+        return _error(400, "Query cannot be empty.", "EMPTY_QUERY")
 
-    if not query.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Query cannot be empty."
-        )
+    clean_query = query.strip()
 
-    # ---------------------------------------------------------
-    # 2. Validate number of files
-    # ---------------------------------------------------------
-
+    # -----------------------------------------------------------------
+    # 2. Validate file count
+    # -----------------------------------------------------------------
     if not files:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one GeoTIFF file is required."
-        )
+        return _error(400, "At least one GeoTIFF file is required.", "NO_FILES")
 
     if len(files) > 3:
-        raise HTTPException(
-            status_code=400,
-            detail="A maximum of 3 files can be uploaded."
-        )
+        return _error(400, "A maximum of 3 files can be uploaded.", "TOO_MANY_FILES")
 
-    # ---------------------------------------------------------
-    # 3. Validate uploaded files
-    # ---------------------------------------------------------
-
-    allowed_extensions = {".tif", ".tiff"}
-
-    file_information = []
+    # -----------------------------------------------------------------
+    # 3. Validate extensions and read file bytes
+    # -----------------------------------------------------------------
+    prepared = []
 
     for uploaded_file in files:
-
         filename = uploaded_file.filename or ""
-
         if not filename:
-            raise HTTPException(
-                status_code=400,
-                detail="One of the uploaded files has no filename."
-            )
+            return _error(400, "One of the uploaded files has no filename.", "INVALID_FORMAT")
 
-        extension = ""
-
+        ext = ""
         if "." in filename:
-            extension = "." + filename.rsplit(".", 1)[1].lower()
+            ext = "." + filename.rsplit(".", 1)[1].lower()
 
-        if extension not in allowed_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Invalid file '{filename}'. "
-                    "Only .tif and .tiff files are supported."
-                )
+        if ext not in ALLOWED_EXTENSIONS:
+            return _error(
+                400,
+                f"Invalid file '{filename}'. Only .tif and .tiff files are supported.",
+                "INVALID_FORMAT",
             )
 
-        file_information.append(
-            {
-                "filename": filename,
-                "content_type": uploaded_file.content_type,
-            }
+        # Read the entire file into memory for the orchestrator
+        content_bytes = uploaded_file.file.read()
+        if not content_bytes:
+            return _error(400, f"File '{filename}' is empty.", "INVALID_FORMAT")
+
+        prepared.append((filename, content_bytes, uploaded_file.content_type))
+
+    logger.info(
+        "Query received: %d file(s), hint=%s, query=%s",
+        len(prepared),
+        task_hint,
+        clean_query[:120],
+    )
+
+    # -----------------------------------------------------------------
+    # 4. Run the orchestrator pipeline
+    # -----------------------------------------------------------------
+    try:
+        result = execute(clean_query, prepared, task_hint=task_hint)
+    except Exception as exc:
+        logger.exception("Pipeline failed for query: %s", clean_query[:200])
+        error_msg = str(exc)
+
+        # Map exception to a meaningful error code
+        error_code = "INFERENCE_FAILED"
+        lower = error_msg.lower()
+        if "not configured" in lower or "kaggle_ngrok_url" in lower:
+            error_code = "EARTHDIAL_UNAVAILABLE"
+        elif "health" in lower or "unreachable" in lower:
+            error_code = "EARTHDIAL_UNAVAILABLE"
+        elif "timeout" in lower or "timed out" in lower:
+            error_code = "INFERENCE_TIMEOUT"
+        elif "multi_endpoint_not_available" in lower:
+            error_code = "MULTI_ENDPOINT_UNAVAILABLE"
+
+        return _error(
+            502,
+            f"Analysis failed: {error_msg[:500]}",
+            error_code,
         )
 
-    # ---------------------------------------------------------
-    # 4. Current test response
-    #
-    # This confirms that FastAPI correctly receives:
-    #     - real uploaded files
-    #     - the user's query
-    #
-    # EarthDial + OmniRoute integration will be connected
-    # after the upload schema is verified.
-    # ---------------------------------------------------------
+    # -----------------------------------------------------------------
+    # 5. Normalize response to match the API contract
+    # -----------------------------------------------------------------
+    geojson = result.get("geojson")
+    if not geojson or not isinstance(geojson, dict):
+        geojson = {"type": "FeatureCollection", "features": []}
 
-    return {
+    # Extract confidence from raw EarthDial response if available
+    raw = result.get("raw", {})
+    confidence = None
+    if isinstance(raw, dict):
+        earthdial_data = raw.get("earthdial")
+        if isinstance(earthdial_data, dict):
+            confidence = earthdial_data.get("confidence")
+
+    # Detect whether EarthDial was actually invoked
+    tool_name = result.get("tool", "unknown")
+    model_used = None
+    if isinstance(raw, dict) and raw.get("earthdial"):
+        model_used = "EarthDial_4B_MS"
+
+    response = {
         "success": True,
-        "answer": "Files received successfully.",
-        "geojson": None,
-        "confidence": None,
-        "execution_trace": [
-            "Files received by FastAPI",
-            "File validation completed",
-        ],
-        "metadata": {
-            "file_count": len(files),
-            "files": file_information,
-            "query": query,
-        },
+        "answer": result.get("answer", "Analysis completed."),
+        "geojson": geojson,
+        "confidence": confidence,
+        "execution_trace": result.get("execution_trace", []),
+        "metadata": result.get("metadata", {}),
+        "tool": tool_name,
+        "model_used": model_used,
     }
+
+    logger.info("Query completed: tool=%s, model=%s", tool_name, model_used)
+    return response
