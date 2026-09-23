@@ -80,8 +80,18 @@ async def query_endpoint(
             result = change_tool.run(query)
         elif decision.task == "optical_sar":
             result = optical_sar_tool.run(query)
+        elif decision.task == "vqa":
+            result = await vqa_tool.run(
+            filepath=str(temp_paths[0]),
+            query=query,
+            modality=modalities[0],
+            metadata=metadata[0],
+            )
         else:
-            result = vqa_tool.run(query)
+            return ErrorResponse(
+            error=f"Unsupported task selected by agent: {decision.task}",
+            error_code="UNSUPPORTED_TASK",
+            )
 
         return SuccessResponse(
             answer=result["answer"],
