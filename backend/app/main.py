@@ -1,35 +1,11 @@
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-from app.routers import query
-
-app = FastAPI(title="SatQuery AI Backend", version="0.1.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(query.router)
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=422,
-        content={
-            "success": False,
-            "error": "Invalid request. Check that query and 1 or 2 GeoTIFF files are provided.",
-            "error_code": "VALIDATION_ERROR",
-        },
-    )
-
-
-@app.get("/")
-def root():
-    return {"status": "SatQuery AI backend is running"}
+from app.config import settings
+from app.routers.health import router as health_router
+from app.routers.query import router as query_router
+app=FastAPI(title='SatQuery AI Backend',version='2.0.0')
+origins=['*'] if settings.cors_origins=='*' else [x.strip() for x in settings.cors_origins.split(',') if x.strip()]
+app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
+app.include_router(health_router); app.include_router(query_router)
+@app.get('/')
+def root(): return {'status':'SatQuery AI backend is running','service':'EarthDial + OmniRoute'}
