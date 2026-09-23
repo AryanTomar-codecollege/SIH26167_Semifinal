@@ -2,7 +2,7 @@ import re
 from app.services.earthdial import earthdial
 from app.services.geospatial import inspect, bbox_feature, ndvi
 
-def metadata(files): return {'tool':'metadata','results':[inspect(c,n) for n,c,_ in files]}
+def metadata(files, q=None): return {'tool':'metadata','results':[inspect(c,n) for n,c,_ in files]}
 def vqa(files,q):
     if len(files)!=1: raise ValueError('VQA expects exactly one image.')
     r=earthdial.infer(files[0],q,'[caption]'); return {'tool':'vqa','answer':r.get('answer',''),'earthdial':r}
