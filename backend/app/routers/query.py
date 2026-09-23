@@ -144,8 +144,16 @@ def query(
     # Detect whether EarthDial was actually invoked
     tool_name = result.get("tool", "unknown")
     model_used = None
-    if isinstance(raw, dict) and raw.get("earthdial"):
-        model_used = "EarthDial_4B_MS"
+    if isinstance(raw, dict):
+        if (
+            raw.get("earthdial")
+            or raw.get("model") == "EarthDial_4B_MS"
+            or raw.get("mode") == "joint_earthdial"
+            or (isinstance(raw.get("image_results"), list) and len(raw.get("image_results")) > 0)
+            or (isinstance(raw.get("individual_results"), list) and len(raw.get("individual_results")) > 0)
+        ):
+            model_used = "EarthDial_4B_MS"
+
 
     response = {
         "success": True,

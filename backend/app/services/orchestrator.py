@@ -60,7 +60,17 @@ def execute(q, files, task_hint="auto"):
     try:
         answer = synthesize(q, tool, result)
     except Exception:
-        answer = result.get('answer', 'Tool execution completed.')
+        if result.get('answer'):
+            answer = result['answer']
+        elif isinstance(result.get('image_results'), list):
+            parts = [f"Image {i+1}: {r.get('answer', '')}" for i, r in enumerate(result['image_results']) if isinstance(r, dict)]
+            answer = "Comparison analysis:\n" + "\n".join(parts) if parts else "Comparison completed."
+        elif isinstance(result.get('individual_results'), list):
+            parts = [f"Image {i+1}: {r.get('answer', '')}" for i, r in enumerate(result['individual_results']) if isinstance(r, dict)]
+            answer = "Individual analysis fallback:\n" + "\n".join(parts) if parts else "Analysis completed."
+        else:
+            answer = "Tool execution completed."
+
 
     return {
         'success': True,
